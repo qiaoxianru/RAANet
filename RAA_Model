@@ -14,7 +14,7 @@ class AntActivation(nn.Module):
         return x * torch.exp(-torch.abs(x / self.decay_factor))
 
 # -------------------- Retention mask for RADConv --------------------
-def compute_retention_mask(kernel_size, t=2.5):
+def compute_retention_mask(kernel_size, t=2.0):
     """
     Generate a retention mask r_retain = exp(-d/t) for RADConv.
     Args:
@@ -38,7 +38,7 @@ def compute_retention_mask(kernel_size, t=2.5):
 # -------------------- Radial Attenuation Attention (RAA) --------------------
 class RadialAttenuationAttention(nn.Module):
     """RAA module: RADConv (spatial attenuation) + FAM (channel attenuation)."""
-    def __init__(self, channel, reduction=16, conv_kernel=5, decay_t=2.5,
+    def __init__(self, channel, reduction=16, conv_kernel=5, decay_t=2.0,
                  fam_decay=6.0):
         super(RadialAttenuationAttention, self).__init__()
 
