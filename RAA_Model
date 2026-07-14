@@ -1,0 +1,99 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+# -------------------- Ant activation function --------------------
+class AntActivation(nn.Module):
+    """Ant activation: x * exp(-|x / t|), simulating biological neural attenuation."""
+    def __init__(self, decay_factor):
+        super(AntActivation, self).__init__()
+        self.decay_factor = decay_factor
+
+    def forward(self, x):
+        return x * torch.exp(-torch.abs(x / self.decay_factor))
+
+# -------------------- Retention mask for RADConv --------------------
+def compute_retention_mask(kernel_size, t=2.5):
+    """
+    Generate a retention mask r_retain = exp(-d/t) for RADConv.
+    Args:
+        kernel_size: (kh, kw) tuple
+        t: decay parameter (attenuation intensity)
+    Returns:
+        mask: tensor of shape (kh, kw)
+    """
+    h, w = kernel_size
+    center_h = h // 2
+    center_w = w // 2
+    mask = torch.zeros(h, w)
+    for i in range(h):
+        for j in range(w):
+            m = i - center_h
+            n = j - center_w
+            dist = math.sqrt(m**2 + n**2)
+            mask[i, j] = math.exp(-abs(dist / t))   # retention ratio
+    return mask
+
+# -------------------- Radial Attenuation Attention (RAA) --------------------
+class RadialAttenuationAttention(nn.Module):
+    """RAA module: RADConv (spatial attenuation) + FAM (channel attenuation)."""
+    def __init__(self, channel, reduction=16, conv_kernel=5, decay_t=2.5,
+                 fam_decay=6.0):
+        super(RadialAttenuationAttention, self).__init__()
+
+        # ---- RADConv: four directional depthwise convolutions ----
+        # Horizontal
+        self.h_conv = nn.Conv2d(channel, channel, (conv_kernel, 3),
+                                padding=(conv_kernel//2, 1), groups=channel, bias=False)
+        # Vertical
+        self.w_conv = nn.Conv2d(channel, channel, (3, conv_kernel),
+                                padding=(1, conv_kernel//2), groups=channel, bias=False)
+        # Main diagonal
+        self.d1_conv = nn.Conv2d(channel, channel, (conv_kernel, conv_kernel),
+                                 padding=conv_kernel//2, groups=channel, bias=False)
+        # Anti-diagonal
+        self.d2_conv = nn.Conv2d(channel, channel, (conv_kernel, conv_kernel),
+                                 padding=conv_kernel//2, groups=channel, bias=False)
+
+        # Retention masks for each kernel shape (exp(-d/t))
+        mask_h = compute_retention_mask((conv_kernel, 3), t=decay_t)
+        mask_v = compute_retention_mask((3, conv_kernel), t=decay_t)
+        mask_d = compute_retention_mask((conv_kernel, conv_kernel), t=decay_t)
+
+        self.register_buffer('mask_h', mask_h.unsqueeze(0).unsqueeze(0))
+        self.register_buffer('mask_v', mask_v.unsqueeze(0).unsqueeze(0))
+        self.register_buffer('mask_d', mask_d.unsqueeze(0).unsqueeze(0))
+
+        # ---- FAM: channel attention with Ant attenuation ----
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.mlp = nn.Sequential(
+            nn.Linear(channel, channel // reduction),
+            AntActivation(fam_decay),          # Ant attenuation after reduction
+            nn.Linear(channel // reduction, channel),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # Apply RADConv with retention masks
+        def apply_radconv(x, conv_layer, mask):
+            weight = conv_layer.weight                     # (c, 1, kh, kw)
+            modulated_weight = weight * mask               # multiply by retention ratio
+            return F.conv2d(x, modulated_weight,
+                            padding=conv_layer.padding, groups=x.shape[1])
+
+        h_out  = apply_radconv(x, self.h_conv, self.mask_h)
+        v_out  = apply_radconv(x, self.w_conv, self.mask_v)
+        d1_out = apply_radconv(x, self.d1_conv, self.mask_d)
+        d2_out = apply_radconv(x, self.d2_conv, self.mask_d)
+
+        # RADConv fusion: element-wise sum of four directional features
+        x_rad = x + h_out + v_out + d1_out + d2_out
+
+        # FAM: channel-wise attenuation and recalibration
+        b, c, _, _ = x_rad.size()
+        att = self.gap(x_rad).view(b, c)
+        att = self.mlp(att)               # Ant + Sigmoid
+        att = att.view(b, c, 1, 1)
+
+        return x * att
