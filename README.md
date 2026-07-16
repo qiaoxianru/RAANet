@@ -25,9 +25,4 @@ The RAA module is embedded into ResNet‑34 residual blocks, consistently improv
 - PyTorch ≥ 1.10 (recommended 2.6.0)
 - torchvision, numpy, matplotlib
 
-Install:
-```bash
-pip install torch torchvision numpy matplotlib
-
-## Training
 All hyperparameters follow the paper (SGD, lr=0.1, momentum=0.9, weight decay=5e‑4, 200 epochs, multi‑step decay at epochs 60/120/160, label smoothing 0.1).
